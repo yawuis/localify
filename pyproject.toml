@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "localify"
+version = "0.1.0"
+description = "Download non-DRM audio tracks with embedded cover art and ID3v2.3 tags directly into Spotify Local Files."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [
+    { name = "pluto" }
+]
+keywords = ["spotify", "local-files", "soundcloud", "youtube", "bandcamp", "mp3", "yt-dlp", "ffmpeg"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Sound/Audio",
+]
+dependencies = [
+    "yt-dlp>=2025.1.0",
+]
+
+[project.scripts]
+localify = "localify.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
