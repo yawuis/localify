@@ -2,6 +2,10 @@
 
 A cross-platform desktop app and CLI tool to import non-DRM audio tracks with embedded cover art and ID3v2.3 metadata directly into Spotify Local Files.
 
+**[Download Windows `.exe` (Latest Release)](https://github.com/yawuis/localify/releases/latest)**
+
+![Localify desktop app](assets/screenshot.png)
+
 ## Features
 
 - **Desktop GUI and CLI:** Double-click the standalone `localify.exe` (or run `localify`) to open a desktop window with URL input, folder picker, auto-saved settings, and one-click tools. Full CLI support is also included for scripting.
