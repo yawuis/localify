@@ -29,7 +29,7 @@ Download `localify-windows.exe` from GitHub Releases (or build it locally with `
 ### From Source (Windows, macOS, Linux)
 
 ```bash
-git clone https://github.com/<your-username>/localify.git
+git clone https://github.com/yawuis/localify.git
 cd localify
 pip install .
 ```
