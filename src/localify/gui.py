@@ -38,6 +38,74 @@ def _open_folder_in_os(path: Path) -> None:
         subprocess.Popen(["xdg-open", str(path)])
 
 
+class ToolTip:
+    """Hover tooltip for Tkinter widgets."""
+
+    def __init__(self, widget: tk.Widget, text: str, delay_ms: int = 350) -> None:
+        self.widget = widget
+        self.text = text
+        self.delay_ms = delay_ms
+        self._after_id: str | None = None
+        self._tip_window: tk.Toplevel | None = None
+
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+        widget.bind("<Destroy>", self._hide, add="+")
+
+    def _schedule(self, _event: tk.Event[tk.Misc]) -> None:
+        self._cancel()
+        self._after_id = self.widget.after(self.delay_ms, self._show)
+
+    def _cancel(self) -> None:
+        if self._after_id is not None:
+            try:
+                self.widget.after_cancel(self._after_id)
+            except tk.TclError:
+                pass
+            self._after_id = None
+
+    def _show(self) -> None:
+        if self._tip_window is not None or not self.widget.winfo_exists():
+            return
+        x = self.widget.winfo_rootx() + 12
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
+
+        tip = tk.Toplevel(self.widget)
+        tip.wm_overrideredirect(True)
+        tip.configure(bg=BORDER)
+
+        label = tk.Label(
+            tip,
+            text=self.text,
+            bg=SURFACE_ALT,
+            fg=FG,
+            font=("Segoe UI", 9),
+            justify="left",
+            wraplength=260,
+            padx=8,
+            pady=5,
+        )
+        label.pack(padx=1, pady=1)
+
+        tip.update_idletasks()
+        screen_w = tip.winfo_screenwidth()
+        tip_w = tip.winfo_reqwidth()
+        if x + tip_w > screen_w - 8:
+            x = max(8, screen_w - tip_w - 8)
+        tip.wm_geometry(f"+{x}+{y}")
+        self._tip_window = tip
+
+    def _hide(self, _event: tk.Event[tk.Misc] | None = None) -> None:
+        self._cancel()
+        if self._tip_window is not None:
+            try:
+                self._tip_window.destroy()
+            except tk.TclError:
+                pass
+            self._tip_window = None
+
+
 class LocalifyApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
@@ -178,7 +246,9 @@ class LocalifyApp:
         ttk.Label(dl_top, text="Track, Playlist, or Artist URLs (one per line)", style="Section.TLabel").pack(
             side="left"
         )
-        ttk.Button(dl_top, text="Paste", style="Secondary.TButton", command=self._paste_url).pack(side="right")
+        paste_btn = ttk.Button(dl_top, text="Paste", style="Secondary.TButton", command=self._paste_url)
+        paste_btn.pack(side="right")
+        ToolTip(paste_btn, "Paste a URL from your clipboard into the URL box.")
 
         self.url_text = tk.Text(
             dl_card,
@@ -224,16 +294,28 @@ class LocalifyApp:
             action_row, text="Download to Spotify", style="Accent.TButton", command=self._start_download
         )
         self.download_btn.pack(side="left")
+        ToolTip(
+            self.download_btn,
+            "Download the listed URLs as Spotify-compatible MP3s with tags and cover art.",
+        )
 
         self.fix_btn = ttk.Button(
             action_row, text="Fix Folder MP3s", style="Secondary.TButton", command=self._start_fix_folder
         )
         self.fix_btn.pack(side="left", padx=(8, 0))
+        ToolTip(
+            self.fix_btn,
+            "Scan your save folder and re-encode disguised or broken MP3s that show 1193046:28:15 in Spotify.",
+        )
 
         self.refresh_btn = ttk.Button(
             action_row, text="Refresh Spotify Cache", style="Secondary.TButton", command=self._refresh_spotify
         )
         self.refresh_btn.pack(side="left", padx=(8, 0))
+        ToolTip(
+            self.refresh_btn,
+            "Delete Spotify's stale local-files.bnk cache so Spotify rescans your folder on next launch.",
+        )
 
         # Settings Card
         settings_card = ttk.Frame(container, style="Card.TFrame", padding=14)
@@ -254,12 +336,13 @@ class LocalifyApp:
         folder_entry.grid(row=0, column=1, sticky="ew", padx=(0, 8))
         folder_entry.bind("<FocusOut>", lambda _e: self._save_current_settings())
 
-        ttk.Button(folder_row, text="Browse...", style="Secondary.TButton", command=self._browse_folder).grid(
-            row=0, column=2, padx=(0, 6)
-        )
-        ttk.Button(folder_row, text="Open", style="Secondary.TButton", command=self._open_output_folder).grid(
-            row=0, column=3
-        )
+        browse_btn = ttk.Button(folder_row, text="Browse...", style="Secondary.TButton", command=self._browse_folder)
+        browse_btn.grid(row=0, column=2, padx=(0, 6))
+        ToolTip(browse_btn, "Choose the folder where downloaded MP3 files are saved.")
+
+        open_btn = ttk.Button(folder_row, text="Open", style="Secondary.TButton", command=self._open_output_folder)
+        open_btn.grid(row=0, column=3)
+        ToolTip(open_btn, "Open the current save folder in your file manager.")
 
         # Bitrate + Checkboxes row
         opts_row = ttk.Frame(settings_card, style="Card.TFrame")
@@ -275,6 +358,7 @@ class LocalifyApp:
         )
         bitrate_box.pack(side="left", padx=(0, 18))
         bitrate_box.bind("<<ComboboxSelected>>", lambda _e: self._save_current_settings())
+        ToolTip(bitrate_box, "Target MP3 audio bitrate (320k is highest quality).")
 
         self.embed_cover_cb = ttk.Checkbutton(
             opts_row,
@@ -284,6 +368,7 @@ class LocalifyApp:
             command=self._on_cover_toggle,
         )
         self.embed_cover_cb.pack(side="left", padx=(0, 14))
+        ToolTip(self.embed_cover_cb, "Embed the track's thumbnail as ID3v2.3 album art inside the MP3.")
 
         self.square_cover_cb = ttk.Checkbutton(
             opts_row,
@@ -293,6 +378,7 @@ class LocalifyApp:
             command=self._save_current_settings,
         )
         self.square_cover_cb.pack(side="left", padx=(0, 14))
+        ToolTip(self.square_cover_cb, "Center-crop rectangular thumbnails (such as YouTube 16:9) into a square cover.")
 
         self.overwrite_cb = ttk.Checkbutton(
             opts_row,
@@ -302,6 +388,7 @@ class LocalifyApp:
             command=self._save_current_settings,
         )
         self.overwrite_cb.pack(side="left")
+        ToolTip(self.overwrite_cb, "Replace an existing MP3 if a file with the same name already exists.")
 
         # Log Card
         log_card = ttk.Frame(container, style="Card.TFrame", padding=14)
@@ -312,7 +399,9 @@ class LocalifyApp:
         log_top = ttk.Frame(log_card, style="Card.TFrame")
         log_top.grid(row=0, column=0, sticky="ew", pady=(0, 6))
         ttk.Label(log_top, text="Activity Log", style="Section.TLabel").pack(side="left")
-        ttk.Button(log_top, text="Clear", style="Secondary.TButton", command=self._clear_log).pack(side="right")
+        clear_btn = ttk.Button(log_top, text="Clear", style="Secondary.TButton", command=self._clear_log)
+        clear_btn.pack(side="right")
+        ToolTip(clear_btn, "Clear all messages from the activity log.")
 
         log_wrap = ttk.Frame(log_card, style="Card.TFrame")
         log_wrap.grid(row=1, column=0, sticky="nsew")
