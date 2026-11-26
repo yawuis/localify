@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 from localify.cli import build_parser
-from localify.downloader import sanitize_filename
+from localify.downloader import clean_track_title, sanitize_filename
 from localify.fixer import ProbeInfo, needs_spotify_fix
 
 
@@ -17,6 +17,18 @@ class TestSanitizeFilename(unittest.TestCase):
 
     def test_fallback_when_empty(self) -> None:
         self.assertEqual(sanitize_filename('<>:"/\\|?*'), "track")
+
+
+class TestCleanTrackTitle(unittest.TestCase):
+    def test_strips_official_audio_and_video_tags(self) -> None:
+        self.assertEqual(clean_track_title("Come Thru (Official Audio)", "untiljapan"), "Come Thru")
+        self.assertEqual(clean_track_title("WELCOME HOME [Official Music Video] (HD)", "untiljapan"), "WELCOME HOME")
+
+    def test_strips_duplicate_leading_artist_prefix(self) -> None:
+        self.assertEqual(clean_track_title("untiljapan - overyou (Lyrics)", "untiljapan"), "overyou")
+
+    def test_preserves_title_if_artist_matches_entire_title(self) -> None:
+        self.assertEqual(clean_track_title("untiljapan", "untiljapan"), "untiljapan")
 
 
 class TestNeedsSpotifyFix(unittest.TestCase):
@@ -48,6 +60,9 @@ class TestCliParser(unittest.TestCase):
                 "256k",
                 "--no-cover",
                 "--no-crop",
+                "--no-clean-title",
+                "--cover",
+                "cover.jpg",
                 "--artist",
                 "test",
             ]
@@ -57,6 +72,8 @@ class TestCliParser(unittest.TestCase):
         self.assertEqual(args.bitrate, "256k")
         self.assertTrue(args.no_cover)
         self.assertTrue(args.no_crop)
+        self.assertTrue(args.no_clean_title)
+        self.assertEqual(args.cover, "cover.jpg")
         self.assertEqual(args.artist, "test")
 
     def test_fix_subcommand(self) -> None:
@@ -65,14 +82,34 @@ class TestCliParser(unittest.TestCase):
         self.assertEqual(args.command, "fix")
         self.assertTrue(args.dry_run)
 
+    def test_tag_subcommand(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args(["tag", "song.mp3", "--title", "New Title", "--artist", "Artist", "--cover", "art.png"])
+        self.assertEqual(args.command, "tag")
+        self.assertEqual(args.file, "song.mp3")
+        self.assertEqual(args.title, "New Title")
+        self.assertEqual(args.artist, "Artist")
+        self.assertEqual(args.cover, "art.png")
+
     def test_config_subcommand(self) -> None:
         parser = build_parser()
         args = parser.parse_args(
-            ["config", "--embed-cover", "false", "--square-cover", "false", "--bitrate", "192k"]
+            [
+                "config",
+                "--embed-cover",
+                "false",
+                "--square-cover",
+                "false",
+                "--clean-titles",
+                "false",
+                "--bitrate",
+                "192k",
+            ]
         )
         self.assertEqual(args.command, "config")
         self.assertFalse(args.embed_cover)
         self.assertFalse(args.square_cover)
+        self.assertFalse(args.clean_titles)
         self.assertEqual(args.bitrate, "192k")
 
     def test_gui_and_cli_subcommands(self) -> None:

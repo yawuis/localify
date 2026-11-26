@@ -14,6 +14,22 @@ import yt_dlp
 from .fixer import require_ffmpeg, subprocess_kwargs
 
 INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+NOISY_TITLE_TAGS = re.compile(
+    r"\s*[\(\[]\s*(?:"
+    r"official\s+(?:music\s+)?video|"
+    r"official\s+audio|"
+    r"official\s+lyric\s+video|"
+    r"official\s+visualizer|"
+    r"lyric\s+video|"
+    r"lyrics|"
+    r"visualizer|"
+    r"audio|"
+    r"hq|"
+    r"hd|"
+    r"4k"
+    r")\s*[\)\]]",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -22,10 +38,13 @@ class DownloadOptions:
     bitrate: str = "320k"
     embed_cover: bool = True
     square_cover: bool = True
+    clean_titles: bool = True
     overwrite: bool = False
     artist_override: str | None = None
     title_override: str | None = None
     album_override: str | None = None
+    cover_override: Path | None = None
+    auto_install_ffmpeg: bool = False
 
 
 @dataclass
@@ -40,6 +59,18 @@ def sanitize_filename(name: str) -> str:
     cleaned = INVALID_FILENAME_CHARS.sub("", name)
     cleaned = re.sub(r"\s+", " ", cleaned).strip().rstrip(".")
     return cleaned or "track"
+
+
+def clean_track_title(title: str, artist: str) -> str:
+    """Strip common upload tags like (Official Audio) and duplicate leading 'Artist - ' prefixes."""
+    cleaned = NOISY_TITLE_TAGS.sub("", title).strip()
+    if artist:
+        prefix_re = re.compile(rf"^{re.escape(artist)}\s*[-–—:]\s*", re.IGNORECASE)
+        stripped = prefix_re.sub("", cleaned).strip()
+        if stripped:
+            cleaned = stripped
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -–—")
+    return cleaned or title.strip()
 
 
 def _find_thumbnail(stage_dir: Path, stem: str) -> Path | None:
@@ -130,23 +161,46 @@ def download_url(
     url: str,
     opts: DownloadOptions,
     log: Callable[[str], None] = print,
+    progress: Callable[[float, str], None] | None = None,
 ) -> list[ImportedTrack]:
     """Download one or more tracks from any yt-dlp-supported non-DRM URL into Spotify Local Files."""
-    ffmpeg, _ = require_ffmpeg()
+    ffmpeg, _ = require_ffmpeg(auto_install=opts.auto_install_ffmpeg, log=log, progress=progress)
+    if opts.cover_override is not None and not opts.cover_override.is_file():
+        raise RuntimeError(f"Custom cover image not found: {opts.cover_override}")
+
     opts.output_dir.mkdir(parents=True, exist_ok=True)
     imported: list[ImportedTrack] = []
+
+    def _ydl_progress_hook(data: dict[str, Any]) -> None:
+        if not progress:
+            return
+        status = data.get("status")
+        if status == "downloading":
+            total = data.get("total_bytes") or data.get("total_bytes_estimate") or 0
+            downloaded = data.get("downloaded_bytes") or 0
+            if total > 0:
+                pct = min(70.0, (downloaded / total) * 70.0)
+                progress(pct, f"Downloading audio... {int((downloaded / total) * 100)}%")
+        elif status == "finished":
+            progress(72.0, "Download finished, preparing MP3...")
+
+    use_remote_thumb = opts.embed_cover and opts.cover_override is None
 
     with tempfile.TemporaryDirectory(prefix="localify_stage_") as tmp:
         stage_dir = Path(tmp)
         ydl_opts: dict[str, Any] = {
             "format": "bestaudio/best",
             "outtmpl": str(stage_dir / "%(id)s.%(ext)s"),
-            "writethumbnail": opts.embed_cover,
+            "writethumbnail": use_remote_thumb,
             "noplaylist": False,
             "ignoreerrors": "only_download",
             "quiet": True,
             "no_warnings": True,
+            "progress_hooks": [_ydl_progress_hook],
         }
+
+        if progress:
+            progress(5.0, "Fetching track info...")
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -162,8 +216,9 @@ def download_url(
 
         entries = _flatten_entries(info)
         audio_exts = {".mp3", ".m4a", ".webm", ".opus", ".ogg", ".wav", ".flac", ".aac", ".mp4"}
+        total_entries = max(len(entries), 1)
 
-        for entry in entries:
+        for idx, entry in enumerate(entries, start=1):
             track_id = str(entry.get("id", ""))
             if not track_id:
                 continue
@@ -177,10 +232,15 @@ def download_url(
             if not audio_src:
                 continue
 
-            title = opts.title_override or str(entry.get("track") or entry.get("title") or track_id).strip()
             artist = (
                 opts.artist_override
                 or str(entry.get("artist") or entry.get("uploader") or entry.get("channel") or "Unknown Artist").strip()
+            )
+            raw_title = opts.title_override or str(entry.get("track") or entry.get("title") or track_id).strip()
+            title = (
+                clean_track_title(raw_title, artist)
+                if (opts.clean_titles and not opts.title_override)
+                else raw_title
             )
             album = opts.album_override or (str(entry.get("album")).strip() if entry.get("album") else None)
 
@@ -191,8 +251,15 @@ def download_url(
                 log(f"[skipped] Already exists: {final_dest.name}")
                 continue
 
-            thumb_src = _find_thumbnail(stage_dir, track_id) if opts.embed_cover else None
+            if opts.embed_cover:
+                thumb_src = opts.cover_override if opts.cover_override is not None else _find_thumbnail(stage_dir, track_id)
+            else:
+                thumb_src = None
+
             staged_mp3 = stage_dir / f"{track_id}_final.mp3"
+            if progress:
+                pct = 75.0 + (idx / total_entries) * 24.0
+                progress(pct, f"Encoding {idx}/{total_entries}: {title}")
 
             has_cover = _encode_spotify_mp3(
                 ffmpeg=ffmpeg,
@@ -209,4 +276,6 @@ def download_url(
             shutil.move(str(staged_mp3), str(final_dest))
             imported.append(ImportedTrack(path=final_dest, title=title, artist=artist, has_cover=has_cover))
 
+    if progress:
+        progress(100.0, "Done")
     return imported

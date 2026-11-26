@@ -30,6 +30,7 @@ class Config:
     bitrate: str = "320k"
     embed_cover: bool = True
     square_cover: bool = True
+    clean_titles: bool = True
     overwrite: bool = False
 
     @classmethod

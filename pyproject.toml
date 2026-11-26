@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "localify"
-version = "0.1.0"
+version = "0.2.0"
 description = "Download non-DRM audio tracks with embedded cover art and ID3v2.3 tags directly into Spotify Local Files."
 readme = "README.md"
 license = "MIT"

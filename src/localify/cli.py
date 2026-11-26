@@ -7,7 +7,7 @@ from pathlib import Path
 from . import __version__
 from .config import Config, config_path, load_config, save_config
 from .downloader import DownloadOptions, download_url
-from .fixer import fix_folder, require_ffmpeg
+from .fixer import fix_folder, require_ffmpeg, update_track_tags
 from .spotify import reset_local_files_cache
 
 
@@ -75,6 +75,9 @@ def _handle_config(args: argparse.Namespace, cfg: Config) -> int:
     if args.square_cover is not None:
         cfg.square_cover = args.square_cover
         changed = True
+    if args.clean_titles is not None:
+        cfg.clean_titles = args.clean_titles
+        changed = True
     if args.overwrite is not None:
         cfg.overwrite = args.overwrite
         changed = True
@@ -88,6 +91,7 @@ def _handle_config(args: argparse.Namespace, cfg: Config) -> int:
     print(f"bitrate:      {cfg.bitrate}")
     print(f"embed_cover:  {cfg.embed_cover}")
     print(f"square_cover: {cfg.square_cover}")
+    print(f"clean_titles: {cfg.clean_titles}")
     print(f"overwrite:    {cfg.overwrite}")
     return 0
 
@@ -104,6 +108,26 @@ def _handle_fix(args: argparse.Namespace, cfg: Config) -> int:
     verb = "Would fix" if args.dry_run else "Fixed"
     print(f"{verb}: {fixed} | Already valid: {skipped} | Failed: {failed}")
     return 1 if failed else 0
+
+
+def _handle_tag(args: argparse.Namespace, cfg: Config) -> int:
+    target = Path(args.file).expanduser()
+    cover = Path(args.cover).expanduser() if args.cover else None
+    try:
+        update_track_tags(
+            mp3_path=target,
+            title=args.title,
+            artist=args.artist,
+            album=args.album,
+            cover_path=cover,
+            square_cover=False if args.no_crop else cfg.square_cover,
+            remove_cover=args.remove_cover,
+        )
+    except (RuntimeError, FileNotFoundError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    print(f"Updated tags: {target.name}")
+    return 0
 
 
 def _handle_refresh_spotify() -> int:
@@ -134,8 +158,10 @@ def build_parser() -> argparse.ArgumentParser:
     dl_parser.add_argument("--artist", help="Override artist ID3 tag")
     dl_parser.add_argument("--title", help="Override title ID3 tag")
     dl_parser.add_argument("--album", help="Override album ID3 tag")
+    dl_parser.add_argument("--cover", help="Embed a custom local image as cover art")
     dl_parser.add_argument("--no-cover", action="store_true", help="Do not embed cover art")
     dl_parser.add_argument("--no-crop", action="store_true", help="Do not square-crop cover art")
+    dl_parser.add_argument("--no-clean-title", action="store_true", help="Keep original title without stripping tags")
     dl_parser.add_argument("--overwrite", action="store_true", help="Overwrite existing MP3 files")
 
     # localify fix
@@ -144,12 +170,23 @@ def build_parser() -> argparse.ArgumentParser:
     fix_parser.add_argument("-b", "--bitrate", help="Target MP3 bitrate")
     fix_parser.add_argument("--dry-run", action="store_true", help="Report files that need fixing without modifying them")
 
+    # localify tag
+    tag_parser = subparsers.add_parser("tag", help="Edit ID3v2.3 tags or cover art on an existing MP3")
+    tag_parser.add_argument("file", help="Path to an existing .mp3 file")
+    tag_parser.add_argument("--title", help="Set title tag")
+    tag_parser.add_argument("--artist", help="Set artist tag")
+    tag_parser.add_argument("--album", help="Set album tag")
+    tag_parser.add_argument("--cover", help="Path to cover image (.jpg/.png/.webp)")
+    tag_parser.add_argument("--no-crop", action="store_true", help="Do not square-crop the cover image")
+    tag_parser.add_argument("--remove-cover", action="store_true", help="Remove existing embedded cover art")
+
     # localify config
     cfg_parser = subparsers.add_parser("config", help="View or update saved localify settings")
     cfg_parser.add_argument("-o", "--output", help="Set default Spotify Local Files folder")
     cfg_parser.add_argument("-b", "--bitrate", help="Set default MP3 bitrate (e.g. 320k)")
     cfg_parser.add_argument("--embed-cover", type=_parse_bool, help="Embed cover art in MP3s (true/false)")
     cfg_parser.add_argument("--square-cover", type=_parse_bool, help="Square-crop cover art (true/false)")
+    cfg_parser.add_argument("--clean-titles", type=_parse_bool, help="Clean noisy upload tags from titles (true/false)")
     cfg_parser.add_argument("--overwrite", type=_parse_bool, help="Overwrite existing files by default (true/false)")
 
     # localify refresh-spotify
@@ -178,6 +215,7 @@ def main(argv: list[str] | None = None) -> int:
     known_commands = {
         "download",
         "fix",
+        "tag",
         "config",
         "refresh-spotify",
         "gui",
@@ -201,6 +239,7 @@ def main(argv: list[str] | None = None) -> int:
             bitrate=cfg.bitrate,
             embed_cover=cfg.embed_cover,
             square_cover=cfg.square_cover,
+            clean_titles=cfg.clean_titles,
             overwrite=cfg.overwrite,
         )
         return _interactive_loop(opts)
@@ -218,6 +257,7 @@ def main(argv: list[str] | None = None) -> int:
             bitrate=cfg.bitrate,
             embed_cover=cfg.embed_cover,
             square_cover=cfg.square_cover,
+            clean_titles=cfg.clean_titles,
             overwrite=cfg.overwrite,
         )
         return _interactive_loop(opts)
@@ -225,6 +265,8 @@ def main(argv: list[str] | None = None) -> int:
         return _handle_config(args, cfg)
     if args.command == "fix":
         return _handle_fix(args, cfg)
+    if args.command == "tag":
+        return _handle_tag(args, cfg)
     if args.command == "refresh-spotify":
         return _handle_refresh_spotify()
     if args.command == "download":
@@ -233,10 +275,12 @@ def main(argv: list[str] | None = None) -> int:
             bitrate=args.bitrate or cfg.bitrate,
             embed_cover=False if args.no_cover else cfg.embed_cover,
             square_cover=False if args.no_crop else cfg.square_cover,
+            clean_titles=False if args.no_clean_title else cfg.clean_titles,
             overwrite=True if args.overwrite else cfg.overwrite,
             artist_override=args.artist,
             title_override=args.title,
             album_override=args.album,
+            cover_override=Path(args.cover).expanduser() if args.cover else None,
         )
         return _run_downloads(args.urls, opts)
 

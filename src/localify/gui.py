@@ -12,7 +12,7 @@ from tkinter import filedialog, ttk
 from . import __version__
 from .config import Config, load_config, save_config
 from .downloader import DownloadOptions, download_url
-from .fixer import fix_folder, require_ffmpeg
+from .fixer import find_ffmpeg, fix_folder, install_ffmpeg_windows, probe_audio, update_track_tags
 from .spotify import reset_local_files_cache
 
 BG = "#121212"
@@ -23,9 +23,10 @@ FG = "#f2f2f5"
 FG_MUTED = "#a0a0ab"
 ACCENT = "#1db954"
 ACCENT_HOVER = "#1ed760"
-DANGER = "#e05252"
 
 BITRATE_CHOICES = ("128k", "192k", "256k", "320k")
+IMAGE_FILETYPES = [("Images", "*.jpg *.jpeg *.png *.webp *.bmp"), ("All files", "*.*")]
+MP3_FILETYPES = [("MP3 files", "*.mp3"), ("All files", "*.*")]
 
 
 def _open_folder_in_os(path: Path) -> None:
@@ -82,7 +83,7 @@ class ToolTip:
             fg=FG,
             font=("Segoe UI", 9),
             justify="left",
-            wraplength=260,
+            wraplength=270,
             padx=8,
             pady=5,
         )
@@ -110,31 +111,47 @@ class LocalifyApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title(f"Localify {__version__}")
-        self.root.geometry("740x680")
-        self.root.minsize(640, 580)
+        self.root.geometry("780x760")
+        self.root.minsize(680, 660)
         self.root.configure(bg=BG)
 
         self.cfg: Config = load_config()
         self._log_queue: queue.Queue[str] = queue.Queue()
+        self._progress_queue: queue.Queue[tuple[float, str]] = queue.Queue()
         self._busy = False
 
-        # Bound Tk variables
+        # Shared settings variables
         self.output_dir_var = tk.StringVar(value=self.cfg.output_dir)
         self.bitrate_var = tk.StringVar(value=self.cfg.bitrate if self.cfg.bitrate in BITRATE_CHOICES else "320k")
         self.embed_cover_var = tk.BooleanVar(value=self.cfg.embed_cover)
         self.square_cover_var = tk.BooleanVar(value=self.cfg.square_cover)
+        self.clean_titles_var = tk.BooleanVar(value=self.cfg.clean_titles)
         self.overwrite_var = tk.BooleanVar(value=self.cfg.overwrite)
 
+        # Download tab variables
         self.artist_var = tk.StringVar()
         self.title_var = tk.StringVar()
         self.album_var = tk.StringVar()
+        self.custom_cover_var = tk.StringVar()
+
+        # Tag editor tab variables
+        self.edit_file_var = tk.StringVar()
+        self.edit_title_var = tk.StringVar()
+        self.edit_artist_var = tk.StringVar()
+        self.edit_album_var = tk.StringVar()
+        self.edit_cover_var = tk.StringVar()
+        self.edit_remove_cover_var = tk.BooleanVar(value=False)
+        self.edit_cover_status_var = tk.StringVar(value="Select an MP3 file to view or edit its tags.")
+
+        # Progress & status variables
+        self.progress_var = tk.DoubleVar(value=0.0)
         self.status_var = tk.StringVar(value="Ready")
 
         self._configure_styles()
         self._build_ui()
         self._sync_cover_checkbox_state()
         self._check_ffmpeg_on_startup()
-        self._poll_log_queue()
+        self._poll_queues()
 
     def _configure_styles(self) -> None:
         style = ttk.Style(self.root)
@@ -152,6 +169,21 @@ class LocalifyApp:
         style.configure("CardMuted.TLabel", background=SURFACE, foreground=FG_MUTED, font=("Segoe UI", 9))
         style.configure("Title.TLabel", background=BG, foreground=FG, font=("Segoe UI Semibold", 16))
         style.configure("Section.TLabel", background=SURFACE, foreground=FG, font=("Segoe UI Semibold", 10))
+
+        style.configure("TNotebook", background=BG, borderwidth=0, tabmargins=(0, 0, 0, 0))
+        style.configure(
+            "TNotebook.Tab",
+            background=SURFACE_ALT,
+            foreground=FG_MUTED,
+            padding=(14, 7),
+            borderwidth=0,
+            font=("Segoe UI Semibold", 9),
+        )
+        style.map(
+            "TNotebook.Tab",
+            background=[("selected", SURFACE)],
+            foreground=[("selected", FG)],
+        )
 
         style.configure(
             "TEntry",
@@ -220,6 +252,16 @@ class LocalifyApp:
             foreground=[("disabled", FG_MUTED)],
         )
 
+        style.configure(
+            "Localify.Horizontal.TProgressbar",
+            troughcolor=SURFACE_ALT,
+            background=ACCENT,
+            bordercolor=BORDER,
+            lightcolor=ACCENT,
+            darkcolor=ACCENT,
+            thickness=6,
+        )
+
     def _build_ui(self) -> None:
         container = ttk.Frame(self.root, padding=16)
         container.pack(fill="both", expand=True)
@@ -228,7 +270,7 @@ class LocalifyApp:
 
         # Header
         header = ttk.Frame(container)
-        header.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         ttk.Label(header, text="Localify", style="Title.TLabel").pack(side="left")
         ttk.Label(
             header,
@@ -236,12 +278,54 @@ class LocalifyApp:
             style="Muted.TLabel",
         ).pack(side="left", padx=(10, 0), pady=(5, 0))
 
-        # Download Card
-        dl_card = ttk.Frame(container, style="Card.TFrame", padding=14)
-        dl_card.grid(row=1, column=0, sticky="ew", pady=(0, 12))
-        dl_card.columnconfigure(0, weight=1)
+        self.install_ffmpeg_btn = ttk.Button(
+            header,
+            text="Install FFmpeg",
+            style="Accent.TButton",
+            command=self._start_install_ffmpeg,
+        )
+        ToolTip(
+            self.install_ffmpeg_btn,
+            "Download and set up FFmpeg automatically for Localify (one-time Windows setup).",
+        )
 
-        dl_top = ttk.Frame(dl_card, style="Card.TFrame")
+        # Tabs (Download / Edit Local Track)
+        notebook = ttk.Notebook(container)
+        notebook.grid(row=1, column=0, sticky="ew", pady=(0, 12))
+
+        dl_tab = ttk.Frame(notebook, style="Card.TFrame", padding=14)
+        edit_tab = ttk.Frame(notebook, style="Card.TFrame", padding=14)
+        notebook.add(dl_tab, text="Download")
+        notebook.add(edit_tab, text="Edit Local Track")
+
+        self._build_download_tab(dl_tab)
+        self._build_edit_tab(edit_tab)
+
+        # Shared Settings Card
+        self._build_settings_card(container)
+
+        # Activity Log Card
+        self._build_log_card(container)
+
+        # Progress bar + status bar
+        footer = ttk.Frame(container)
+        footer.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+        footer.columnconfigure(0, weight=1)
+
+        self.progress_bar = ttk.Progressbar(
+            footer,
+            variable=self.progress_var,
+            maximum=100.0,
+            mode="determinate",
+            style="Localify.Horizontal.TProgressbar",
+        )
+        self.progress_bar.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        ttk.Label(footer, textvariable=self.status_var, style="Muted.TLabel").grid(row=1, column=0, sticky="w")
+
+    def _build_download_tab(self, parent: ttk.Frame) -> None:
+        parent.columnconfigure(0, weight=1)
+
+        dl_top = ttk.Frame(parent, style="Card.TFrame")
         dl_top.grid(row=0, column=0, sticky="ew", pady=(0, 6))
         ttk.Label(dl_top, text="Track, Playlist, or Artist URLs (one per line)", style="Section.TLabel").pack(
             side="left"
@@ -251,7 +335,7 @@ class LocalifyApp:
         ToolTip(paste_btn, "Paste a URL from your clipboard into the URL box.")
 
         self.url_text = tk.Text(
-            dl_card,
+            parent,
             height=3,
             bg=SURFACE_ALT,
             fg=FG,
@@ -268,7 +352,7 @@ class LocalifyApp:
         self.url_text.grid(row=1, column=0, sticky="ew", pady=(0, 10))
 
         # Optional metadata overrides
-        meta_frame = ttk.Frame(dl_card, style="Card.TFrame")
+        meta_frame = ttk.Frame(parent, style="Card.TFrame")
         meta_frame.grid(row=2, column=0, sticky="ew", pady=(0, 10))
         for col in (0, 1, 2):
             meta_frame.columnconfigure(col, weight=1)
@@ -287,8 +371,34 @@ class LocalifyApp:
         ttk.Entry(meta_frame, textvariable=self.title_var).grid(row=1, column=1, sticky="ew", padx=(0, 6), pady=(2, 0))
         ttk.Entry(meta_frame, textvariable=self.album_var).grid(row=1, column=2, sticky="ew", pady=(2, 0))
 
-        action_row = ttk.Frame(dl_card, style="Card.TFrame")
-        action_row.grid(row=3, column=0, sticky="ew")
+        # Custom cover image override
+        cover_row = ttk.Frame(parent, style="Card.TFrame")
+        cover_row.grid(row=3, column=0, sticky="ew", pady=(0, 10))
+        cover_row.columnconfigure(1, weight=1)
+
+        ttk.Label(cover_row, text="Custom cover (optional):", style="CardMuted.TLabel").grid(
+            row=0, column=0, sticky="w", padx=(0, 8)
+        )
+        ttk.Entry(cover_row, textvariable=self.custom_cover_var).grid(row=0, column=1, sticky="ew", padx=(0, 6))
+
+        pick_cover_btn = ttk.Button(
+            cover_row, text="Choose Image...", style="Secondary.TButton", command=self._browse_download_cover
+        )
+        pick_cover_btn.grid(row=0, column=2, padx=(0, 6))
+        ToolTip(pick_cover_btn, "Use a local image instead of the track's default thumbnail.")
+
+        clear_cover_btn = ttk.Button(
+            cover_row,
+            text="Clear",
+            style="Secondary.TButton",
+            command=lambda: self.custom_cover_var.set(""),
+        )
+        clear_cover_btn.grid(row=0, column=3)
+        ToolTip(clear_cover_btn, "Revert to using the track's automatic thumbnail.")
+
+        # Action buttons
+        action_row = ttk.Frame(parent, style="Card.TFrame")
+        action_row.grid(row=4, column=0, sticky="ew")
 
         self.download_btn = ttk.Button(
             action_row, text="Download to Spotify", style="Accent.TButton", command=self._start_download
@@ -317,7 +427,83 @@ class LocalifyApp:
             "Delete Spotify's stale local-files.bnk cache so Spotify rescans your folder on next launch.",
         )
 
-        # Settings Card
+    def _build_edit_tab(self, parent: ttk.Frame) -> None:
+        parent.columnconfigure(0, weight=1)
+
+        file_row = ttk.Frame(parent, style="Card.TFrame")
+        file_row.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        file_row.columnconfigure(1, weight=1)
+
+        ttk.Label(file_row, text="MP3 file:", style="Card.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        ttk.Entry(file_row, textvariable=self.edit_file_var).grid(row=0, column=1, sticky="ew", padx=(0, 6))
+        pick_mp3_btn = ttk.Button(
+            file_row, text="Choose MP3...", style="Secondary.TButton", command=self._browse_edit_mp3
+        )
+        pick_mp3_btn.grid(row=0, column=2)
+        ToolTip(pick_mp3_btn, "Select an existing MP3 file from your Spotify folder to edit its tags or cover art.")
+
+        meta_frame = ttk.Frame(parent, style="Card.TFrame")
+        meta_frame.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        for col in (0, 1, 2):
+            meta_frame.columnconfigure(col, weight=1)
+
+        ttk.Label(meta_frame, text="Title", style="CardMuted.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 6))
+        ttk.Label(meta_frame, text="Artist", style="CardMuted.TLabel").grid(row=0, column=1, sticky="w", padx=(0, 6))
+        ttk.Label(meta_frame, text="Album", style="CardMuted.TLabel").grid(row=0, column=2, sticky="w")
+
+        ttk.Entry(meta_frame, textvariable=self.edit_title_var).grid(row=1, column=0, sticky="ew", padx=(0, 6), pady=(2, 0))
+        ttk.Entry(meta_frame, textvariable=self.edit_artist_var).grid(row=1, column=1, sticky="ew", padx=(0, 6), pady=(2, 0))
+        ttk.Entry(meta_frame, textvariable=self.edit_album_var).grid(row=1, column=2, sticky="ew", pady=(2, 0))
+
+        cover_row = ttk.Frame(parent, style="Card.TFrame")
+        cover_row.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+        cover_row.columnconfigure(1, weight=1)
+
+        ttk.Label(cover_row, text="New cover image:", style="CardMuted.TLabel").grid(
+            row=0, column=0, sticky="w", padx=(0, 8)
+        )
+        ttk.Entry(cover_row, textvariable=self.edit_cover_var).grid(row=0, column=1, sticky="ew", padx=(0, 6))
+        edit_cover_btn = ttk.Button(
+            cover_row, text="Choose Image...", style="Secondary.TButton", command=self._browse_edit_cover
+        )
+        edit_cover_btn.grid(row=0, column=2, padx=(0, 6))
+        ToolTip(edit_cover_btn, "Choose a new cover image to embed into this MP3.")
+
+        clear_edit_cover_btn = ttk.Button(
+            cover_row,
+            text="Clear",
+            style="Secondary.TButton",
+            command=lambda: self.edit_cover_var.set(""),
+        )
+        clear_edit_cover_btn.grid(row=0, column=3)
+        ToolTip(clear_edit_cover_btn, "Keep the current cover art unchanged.")
+
+        bottom_row = ttk.Frame(parent, style="Card.TFrame")
+        bottom_row.grid(row=3, column=0, sticky="ew", pady=(4, 0))
+
+        self.save_tags_btn = ttk.Button(
+            bottom_row, text="Save Tags & Cover", style="Accent.TButton", command=self._start_save_tags
+        )
+        self.save_tags_btn.pack(side="left")
+        ToolTip(
+            self.save_tags_btn,
+            "Write ID3v2.3 tags and cover art into the selected MP3 without re-encoding audio.",
+        )
+
+        remove_cb = ttk.Checkbutton(
+            bottom_row,
+            text="Remove existing cover",
+            variable=self.edit_remove_cover_var,
+            style="Card.TCheckbutton",
+        )
+        remove_cb.pack(side="left", padx=(14, 0))
+        ToolTip(remove_cb, "Strip the embedded cover image from this MP3 when saving.")
+
+        ttk.Label(parent, textvariable=self.edit_cover_status_var, style="CardMuted.TLabel").grid(
+            row=4, column=0, sticky="w", pady=(8, 0)
+        )
+
+    def _build_settings_card(self, container: ttk.Frame) -> None:
         settings_card = ttk.Frame(container, style="Card.TFrame", padding=14)
         settings_card.grid(row=2, column=0, sticky="ew", pady=(0, 12))
         settings_card.columnconfigure(0, weight=1)
@@ -326,7 +512,6 @@ class LocalifyApp:
             row=0, column=0, sticky="w", pady=(0, 8)
         )
 
-        # Output folder row
         folder_row = ttk.Frame(settings_card, style="Card.TFrame")
         folder_row.grid(row=1, column=0, sticky="ew", pady=(0, 10))
         folder_row.columnconfigure(1, weight=1)
@@ -344,7 +529,6 @@ class LocalifyApp:
         open_btn.grid(row=0, column=3)
         ToolTip(open_btn, "Open the current save folder in your file manager.")
 
-        # Bitrate + Checkboxes row
         opts_row = ttk.Frame(settings_card, style="Card.TFrame")
         opts_row.grid(row=2, column=0, sticky="ew")
 
@@ -356,7 +540,7 @@ class LocalifyApp:
             state="readonly",
             width=7,
         )
-        bitrate_box.pack(side="left", padx=(0, 18))
+        bitrate_box.pack(side="left", padx=(0, 16))
         bitrate_box.bind("<<ComboboxSelected>>", lambda _e: self._save_current_settings())
         ToolTip(bitrate_box, "Target MP3 audio bitrate (320k is highest quality).")
 
@@ -367,18 +551,31 @@ class LocalifyApp:
             style="Card.TCheckbutton",
             command=self._on_cover_toggle,
         )
-        self.embed_cover_cb.pack(side="left", padx=(0, 14))
+        self.embed_cover_cb.pack(side="left", padx=(0, 12))
         ToolTip(self.embed_cover_cb, "Embed the track's thumbnail as ID3v2.3 album art inside the MP3.")
 
         self.square_cover_cb = ttk.Checkbutton(
             opts_row,
-            text="Crop cover to 1:1 square",
+            text="Square crop (1:1)",
             variable=self.square_cover_var,
             style="Card.TCheckbutton",
             command=self._save_current_settings,
         )
-        self.square_cover_cb.pack(side="left", padx=(0, 14))
+        self.square_cover_cb.pack(side="left", padx=(0, 12))
         ToolTip(self.square_cover_cb, "Center-crop rectangular thumbnails (such as YouTube 16:9) into a square cover.")
+
+        self.clean_titles_cb = ttk.Checkbutton(
+            opts_row,
+            text="Clean titles",
+            variable=self.clean_titles_var,
+            style="Card.TCheckbutton",
+            command=self._save_current_settings,
+        )
+        self.clean_titles_cb.pack(side="left", padx=(0, 12))
+        ToolTip(
+            self.clean_titles_cb,
+            "Strip noisy upload tags like (Official Audio) and duplicate artist prefixes from track titles.",
+        )
 
         self.overwrite_cb = ttk.Checkbutton(
             opts_row,
@@ -390,7 +587,7 @@ class LocalifyApp:
         self.overwrite_cb.pack(side="left")
         ToolTip(self.overwrite_cb, "Replace an existing MP3 if a file with the same name already exists.")
 
-        # Log Card
+    def _build_log_card(self, container: ttk.Frame) -> None:
         log_card = ttk.Frame(container, style="Card.TFrame", padding=14)
         log_card.grid(row=3, column=0, sticky="nsew")
         log_card.columnconfigure(0, weight=1)
@@ -427,15 +624,13 @@ class LocalifyApp:
         scrollbar.grid(row=0, column=1, sticky="ns")
         self.log_text.configure(yscrollcommand=scrollbar.set)
 
-        # Status bar
-        status_bar = ttk.Frame(container)
-        status_bar.grid(row=4, column=0, sticky="ew", pady=(8, 0))
-        ttk.Label(status_bar, textvariable=self.status_var, style="Muted.TLabel").pack(side="left")
-
     def _log(self, message: str) -> None:
         self._log_queue.put(message)
 
-    def _poll_log_queue(self) -> None:
+    def _report_progress(self, pct: float, text: str) -> None:
+        self._progress_queue.put((pct, text))
+
+    def _poll_queues(self) -> None:
         while True:
             try:
                 msg = self._log_queue.get_nowait()
@@ -445,7 +640,16 @@ class LocalifyApp:
             self.log_text.insert("end", msg + "\n")
             self.log_text.see("end")
             self.log_text.configure(state="disabled")
-        self.root.after(100, self._poll_log_queue)
+
+        while True:
+            try:
+                pct, text = self._progress_queue.get_nowait()
+            except queue.Empty:
+                break
+            self.progress_var.set(pct)
+            self.status_var.set(text)
+
+        self.root.after(80, self._poll_queues)
 
     def _clear_log(self) -> None:
         self.log_text.configure(state="normal")
@@ -458,7 +662,11 @@ class LocalifyApp:
         self.download_btn.configure(state=state)
         self.fix_btn.configure(state=state)
         self.refresh_btn.configure(state=state)
+        self.save_tags_btn.configure(state=state)
+        self.install_ffmpeg_btn.configure(state=state)
         self.status_var.set(status)
+        if not busy:
+            self.progress_var.set(0.0)
 
     def _sync_cover_checkbox_state(self) -> None:
         if self.embed_cover_var.get():
@@ -477,17 +685,42 @@ class LocalifyApp:
         self.cfg.bitrate = self.bitrate_var.get()
         self.cfg.embed_cover = self.embed_cover_var.get()
         self.cfg.square_cover = self.square_cover_var.get()
+        self.cfg.clean_titles = self.clean_titles_var.get()
         self.cfg.overwrite = self.overwrite_var.get()
         save_config(self.cfg)
         return self.cfg
 
     def _check_ffmpeg_on_startup(self) -> None:
-        try:
-            require_ffmpeg()
+        if find_ffmpeg():
+            self.install_ffmpeg_btn.pack_forget()
             self._log(f"Ready. Saving tracks to: {self.cfg.output_dir}")
-        except RuntimeError as exc:
-            self._log(f"Warning: {exc}")
-            self.status_var.set("FFmpeg not found on PATH")
+        else:
+            if sys.platform == "win32":
+                self.install_ffmpeg_btn.pack(side="right")
+                self._log("FFmpeg not found. Click 'Install FFmpeg' (or start a download to auto-install it).")
+                self.status_var.set("FFmpeg not installed yet (auto-install available)")
+            else:
+                self._log("Warning: FFmpeg not found on PATH. Install it with brew/apt before downloading.")
+                self.status_var.set("FFmpeg not found on PATH")
+
+    def _start_install_ffmpeg(self) -> None:
+        if self._busy:
+            return
+        self._set_busy(True, "Installing FFmpeg...")
+
+        def worker() -> None:
+            try:
+                install_ffmpeg_windows(log=self._log, progress=self._report_progress)
+                self.root.after(0, self._on_ffmpeg_installed)
+            except RuntimeError as exc:
+                self._log(f"Error: {exc}")
+                self.root.after(0, lambda: self._set_busy(False, f"FFmpeg install failed: {exc}"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_ffmpeg_installed(self) -> None:
+        self.install_ffmpeg_btn.pack_forget()
+        self._set_busy(False, "FFmpeg installed and ready")
 
     def _paste_url(self) -> None:
         try:
@@ -510,6 +743,41 @@ class LocalifyApp:
             self._save_current_settings()
             self._log(f"Output folder set to: {chosen}")
 
+    def _browse_download_cover(self) -> None:
+        chosen = filedialog.askopenfilename(title="Select Cover Image", filetypes=IMAGE_FILETYPES)
+        if chosen:
+            self.custom_cover_var.set(str(Path(chosen)))
+
+    def _browse_edit_cover(self) -> None:
+        chosen = filedialog.askopenfilename(title="Select New Cover Image", filetypes=IMAGE_FILETYPES)
+        if chosen:
+            self.edit_cover_var.set(str(Path(chosen)))
+            self.edit_remove_cover_var.set(False)
+
+    def _browse_edit_mp3(self) -> None:
+        initial = self.output_dir_var.get().strip() or str(Path.home())
+        chosen = filedialog.askopenfilename(
+            initialdir=initial if Path(initial).is_dir() else str(Path.home()),
+            title="Select MP3 Track to Edit",
+            filetypes=MP3_FILETYPES,
+        )
+        if not chosen:
+            return
+        path = Path(chosen)
+        self.edit_file_var.set(str(path))
+        self.edit_cover_var.set("")
+        self.edit_remove_cover_var.set(False)
+
+        info = probe_audio(path)
+        if info:
+            self.edit_title_var.set(info.title)
+            self.edit_artist_var.set(info.artist)
+            self.edit_album_var.set(info.album)
+            cover_state = "Has embedded cover art" if info.has_attached_pic else "No embedded cover art"
+            self.edit_cover_status_var.set(f"Loaded {path.name} ({cover_state})")
+        else:
+            self.edit_cover_status_var.set(f"Loaded {path.name} (could not read existing tags)")
+
     def _open_output_folder(self) -> None:
         folder = Path(self.output_dir_var.get().strip() or self.cfg.output_dir).expanduser()
         try:
@@ -527,15 +795,19 @@ class LocalifyApp:
             return
 
         cfg = self._save_current_settings()
+        cover_text = self.custom_cover_var.get().strip()
         opts = DownloadOptions(
             output_dir=Path(cfg.output_dir),
             bitrate=cfg.bitrate,
             embed_cover=cfg.embed_cover,
             square_cover=cfg.square_cover,
+            clean_titles=cfg.clean_titles,
             overwrite=cfg.overwrite,
             artist_override=self.artist_var.get().strip() or None,
             title_override=self.title_var.get().strip() or None,
             album_override=self.album_var.get().strip() or None,
+            cover_override=Path(cover_text).expanduser() if cover_text else None,
+            auto_install_ffmpeg=(sys.platform == "win32"),
         )
 
         self._set_busy(True, f"Downloading {len(urls)} URL(s)...")
@@ -546,7 +818,7 @@ class LocalifyApp:
             for url in urls:
                 self._log(f"Downloading: {url}")
                 try:
-                    tracks = download_url(url, opts, log=self._log)
+                    tracks = download_url(url, opts, log=self._log, progress=self._report_progress)
                     if not tracks:
                         self._log("  No new tracks added.")
                     for track in tracks:
@@ -566,12 +838,60 @@ class LocalifyApp:
         threading.Thread(target=worker, daemon=True).start()
 
     def _finish_download(self, clear_inputs: bool, status: str) -> None:
+        if find_ffmpeg():
+            self.install_ffmpeg_btn.pack_forget()
         if clear_inputs:
             self.url_text.delete("1.0", "end")
             self.artist_var.set("")
             self.title_var.set("")
             self.album_var.set("")
+            self.custom_cover_var.set("")
         self._set_busy(False, status)
+
+    def _start_save_tags(self) -> None:
+        if self._busy:
+            return
+        file_text = self.edit_file_var.get().strip()
+        if not file_text:
+            self._log("Select an MP3 file first.")
+            return
+
+        cfg = self._save_current_settings()
+        mp3_path = Path(file_text).expanduser()
+        cover_text = self.edit_cover_var.get().strip()
+        cover_path = Path(cover_text).expanduser() if cover_text else None
+        title = self.edit_title_var.get().strip()
+        artist = self.edit_artist_var.get().strip()
+        album = self.edit_album_var.get().strip()
+        remove_cover = self.edit_remove_cover_var.get()
+
+        self._set_busy(True, f"Updating {mp3_path.name}...")
+
+        def worker() -> None:
+            try:
+                update_track_tags(
+                    mp3_path=mp3_path,
+                    title=title,
+                    artist=artist,
+                    album=album,
+                    cover_path=cover_path,
+                    square_cover=cfg.square_cover,
+                    remove_cover=remove_cover,
+                )
+                msg = f"Updated tags/cover for {mp3_path.name}"
+                self._log(msg)
+                self.root.after(0, lambda: self._finish_save_tags(msg))
+            except (RuntimeError, FileNotFoundError) as exc:
+                msg = f"Error: {exc}"
+                self._log(msg)
+                self.root.after(0, lambda: self._set_busy(False, msg))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_save_tags(self, msg: str) -> None:
+        self.edit_cover_var.set("")
+        self.edit_cover_status_var.set(f"{msg} (restart Spotify or click Refresh Spotify Cache if needed)")
+        self._set_busy(False, msg)
 
     def _start_fix_folder(self) -> None:
         if self._busy:
@@ -583,7 +903,9 @@ class LocalifyApp:
         def worker() -> None:
             self._log(f"Scanning MP3s in: {target}")
             try:
-                fixed, skipped, failed = fix_folder(target, bitrate=cfg.bitrate, log=self._log)
+                fixed, skipped, failed = fix_folder(
+                    target, bitrate=cfg.bitrate, log=self._log, progress=self._report_progress
+                )
                 summary = f"Fix complete: {fixed} fixed, {skipped} already valid, {failed} failed"
             except (RuntimeError, FileNotFoundError) as exc:
                 summary = f"Error: {exc}"
