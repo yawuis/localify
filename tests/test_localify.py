@@ -41,11 +41,21 @@ class TestCliParser(unittest.TestCase):
     def test_download_subcommand(self) -> None:
         parser = build_parser()
         args = parser.parse_args(
-            ["download", "https://soundcloud.com/example/track", "--bitrate", "256k", "--no-crop", "--artist", "test"]
+            [
+                "download",
+                "https://soundcloud.com/example/track",
+                "--bitrate",
+                "256k",
+                "--no-cover",
+                "--no-crop",
+                "--artist",
+                "test",
+            ]
         )
         self.assertEqual(args.command, "download")
         self.assertEqual(args.urls, ["https://soundcloud.com/example/track"])
         self.assertEqual(args.bitrate, "256k")
+        self.assertTrue(args.no_cover)
         self.assertTrue(args.no_crop)
         self.assertEqual(args.artist, "test")
 
@@ -57,10 +67,18 @@ class TestCliParser(unittest.TestCase):
 
     def test_config_subcommand(self) -> None:
         parser = build_parser()
-        args = parser.parse_args(["config", "--square-cover", "false", "--bitrate", "192k"])
+        args = parser.parse_args(
+            ["config", "--embed-cover", "false", "--square-cover", "false", "--bitrate", "192k"]
+        )
         self.assertEqual(args.command, "config")
+        self.assertFalse(args.embed_cover)
         self.assertFalse(args.square_cover)
         self.assertEqual(args.bitrate, "192k")
+
+    def test_gui_and_cli_subcommands(self) -> None:
+        parser = build_parser()
+        self.assertEqual(parser.parse_args(["gui"]).command, "gui")
+        self.assertEqual(parser.parse_args(["cli"]).command, "cli")
 
 
 if __name__ == "__main__":

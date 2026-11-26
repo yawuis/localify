@@ -4,13 +4,14 @@ import re
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import yt_dlp
 
-from .fixer import require_ffmpeg
+from .fixer import require_ffmpeg, subprocess_kwargs
 
 INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
@@ -19,6 +20,7 @@ INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 class DownloadOptions:
     output_dir: Path
     bitrate: str = "320k"
+    embed_cover: bool = True
     square_cover: bool = True
     overwrite: bool = False
     artist_override: str | None = None
@@ -108,7 +110,7 @@ def _encode_spotify_mp3(
 
     cmd.append(str(dest_path))
 
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False, **subprocess_kwargs())
     if proc.returncode != 0:
         raise RuntimeError(f"ffmpeg failed for {title}: {proc.stderr.strip()}")
     return has_cover
@@ -124,7 +126,11 @@ def _flatten_entries(info: dict[str, Any]) -> list[dict[str, Any]]:
     return [info]
 
 
-def download_url(url: str, opts: DownloadOptions) -> list[ImportedTrack]:
+def download_url(
+    url: str,
+    opts: DownloadOptions,
+    log: Callable[[str], None] = print,
+) -> list[ImportedTrack]:
     """Download one or more tracks from any yt-dlp-supported non-DRM URL into Spotify Local Files."""
     ffmpeg, _ = require_ffmpeg()
     opts.output_dir.mkdir(parents=True, exist_ok=True)
@@ -135,7 +141,7 @@ def download_url(url: str, opts: DownloadOptions) -> list[ImportedTrack]:
         ydl_opts: dict[str, Any] = {
             "format": "bestaudio/best",
             "outtmpl": str(stage_dir / "%(id)s.%(ext)s"),
-            "writethumbnail": True,
+            "writethumbnail": opts.embed_cover,
             "noplaylist": False,
             "ignoreerrors": "only_download",
             "quiet": True,
@@ -182,10 +188,10 @@ def download_url(url: str, opts: DownloadOptions) -> list[ImportedTrack]:
             final_dest = opts.output_dir / file_name
 
             if final_dest.exists() and not opts.overwrite:
-                print(f"[skipped] Already exists: {final_dest.name}")
+                log(f"[skipped] Already exists: {final_dest.name}")
                 continue
 
-            thumb_src = _find_thumbnail(stage_dir, track_id)
+            thumb_src = _find_thumbnail(stage_dir, track_id) if opts.embed_cover else None
             staged_mp3 = stage_dir / f"{track_id}_final.mp3"
 
             has_cover = _encode_spotify_mp3(

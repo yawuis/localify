@@ -29,8 +29,16 @@ dependencies = [
     "yt-dlp>=2025.1.0",
 ]
 
+[project.optional-dependencies]
+build = [
+    "pyinstaller>=6.0.0",
+]
+
 [project.scripts]
 localify = "localify.cli:main"
+
+[project.gui-scripts]
+localify-gui = "localify.gui:launch_gui"
 
 [tool.setuptools.packages.find]
 where = ["src"]

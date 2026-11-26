@@ -28,6 +28,7 @@ def get_default_output_dir() -> Path:
 class Config:
     output_dir: str
     bitrate: str = "320k"
+    embed_cover: bool = True
     square_cover: bool = True
     overwrite: bool = False
 

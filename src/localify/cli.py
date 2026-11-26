@@ -69,6 +69,9 @@ def _handle_config(args: argparse.Namespace, cfg: Config) -> int:
     if args.bitrate is not None:
         cfg.bitrate = args.bitrate
         changed = True
+    if args.embed_cover is not None:
+        cfg.embed_cover = args.embed_cover
+        changed = True
     if args.square_cover is not None:
         cfg.square_cover = args.square_cover
         changed = True
@@ -83,6 +86,7 @@ def _handle_config(args: argparse.Namespace, cfg: Config) -> int:
     print(f"Config file:  {config_path()}")
     print(f"output_dir:   {cfg.output_dir}")
     print(f"bitrate:      {cfg.bitrate}")
+    print(f"embed_cover:  {cfg.embed_cover}")
     print(f"square_cover: {cfg.square_cover}")
     print(f"overwrite:    {cfg.overwrite}")
     return 0
@@ -130,6 +134,7 @@ def build_parser() -> argparse.ArgumentParser:
     dl_parser.add_argument("--artist", help="Override artist ID3 tag")
     dl_parser.add_argument("--title", help="Override title ID3 tag")
     dl_parser.add_argument("--album", help="Override album ID3 tag")
+    dl_parser.add_argument("--no-cover", action="store_true", help="Do not embed cover art")
     dl_parser.add_argument("--no-crop", action="store_true", help="Do not square-crop cover art")
     dl_parser.add_argument("--overwrite", action="store_true", help="Overwrite existing MP3 files")
 
@@ -143,29 +148,58 @@ def build_parser() -> argparse.ArgumentParser:
     cfg_parser = subparsers.add_parser("config", help="View or update saved localify settings")
     cfg_parser.add_argument("-o", "--output", help="Set default Spotify Local Files folder")
     cfg_parser.add_argument("-b", "--bitrate", help="Set default MP3 bitrate (e.g. 320k)")
+    cfg_parser.add_argument("--embed-cover", type=_parse_bool, help="Embed cover art in MP3s (true/false)")
     cfg_parser.add_argument("--square-cover", type=_parse_bool, help="Square-crop cover art (true/false)")
     cfg_parser.add_argument("--overwrite", type=_parse_bool, help="Overwrite existing files by default (true/false)")
 
     # localify refresh-spotify
     subparsers.add_parser("refresh-spotify", help="Clear Spotify's stale local-files.bnk cache")
 
+    # localify gui / cli
+    subparsers.add_parser("gui", help="Open the desktop GUI window")
+    subparsers.add_parser("cli", help="Open interactive terminal mode")
+
     return parser
+
+
+def _try_launch_gui() -> int | None:
+    try:
+        from .gui import launch_gui
+
+        return launch_gui()
+    except Exception:
+        return None
 
 
 def main(argv: list[str] | None = None) -> int:
     raw_args = list(sys.argv[1:] if argv is None else argv)
     cfg = load_config()
 
-    known_commands = {"download", "fix", "config", "refresh-spotify", "-h", "--help", "-v", "--version"}
+    known_commands = {
+        "download",
+        "fix",
+        "config",
+        "refresh-spotify",
+        "gui",
+        "cli",
+        "-h",
+        "--help",
+        "-v",
+        "--version",
+    }
 
     # Allow shorthand: `localify <url> [url ...]`
     if raw_args and raw_args[0] not in known_commands and not raw_args[0].startswith("-"):
         raw_args = ["download", *raw_args]
 
     if not raw_args:
+        gui_rc = _try_launch_gui()
+        if gui_rc is not None:
+            return gui_rc
         opts = DownloadOptions(
             output_dir=Path(cfg.output_dir),
             bitrate=cfg.bitrate,
+            embed_cover=cfg.embed_cover,
             square_cover=cfg.square_cover,
             overwrite=cfg.overwrite,
         )
@@ -174,6 +208,19 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(raw_args)
 
+    if args.command == "gui":
+        from .gui import launch_gui
+
+        return launch_gui()
+    if args.command == "cli":
+        opts = DownloadOptions(
+            output_dir=Path(cfg.output_dir),
+            bitrate=cfg.bitrate,
+            embed_cover=cfg.embed_cover,
+            square_cover=cfg.square_cover,
+            overwrite=cfg.overwrite,
+        )
+        return _interactive_loop(opts)
     if args.command == "config":
         return _handle_config(args, cfg)
     if args.command == "fix":
@@ -184,6 +231,7 @@ def main(argv: list[str] | None = None) -> int:
         opts = DownloadOptions(
             output_dir=Path(args.output).expanduser() if args.output else Path(cfg.output_dir),
             bitrate=args.bitrate or cfg.bitrate,
+            embed_cover=False if args.no_cover else cfg.embed_cover,
             square_cover=False if args.no_crop else cfg.square_cover,
             overwrite=True if args.overwrite else cfg.overwrite,
             artist_override=args.artist,

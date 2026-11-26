@@ -3,9 +3,18 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+
+
+def subprocess_kwargs() -> dict[str, int]:
+    """Hide console windows on Windows when invoked from the GUI."""
+    if sys.platform == "win32" and hasattr(subprocess, "CREATE_NO_WINDOW"):
+        return {"creationflags": subprocess.CREATE_NO_WINDOW}
+    return {}
 
 
 @dataclass
@@ -48,6 +57,7 @@ def probe_audio(file_path: Path, ffprobe_bin: str | None = None) -> ProbeInfo | 
         capture_output=True,
         text=True,
         check=False,
+        **subprocess_kwargs(),
     )
     if proc.returncode != 0:
         return None
@@ -89,7 +99,12 @@ def needs_spotify_fix(info: ProbeInfo | None) -> bool:
     return False
 
 
-def fix_folder(folder: Path, bitrate: str = "320k", dry_run: bool = False) -> tuple[int, int, int]:
+def fix_folder(
+    folder: Path,
+    bitrate: str = "320k",
+    dry_run: bool = False,
+    log: Callable[[str], None] = print,
+) -> tuple[int, int, int]:
     """Scan folder for disguised or broken .mp3 files and re-encode them cleanly.
 
     Returns (fixed_count, skipped_count, failed_count).
@@ -115,7 +130,7 @@ def fix_folder(folder: Path, bitrate: str = "320k", dry_run: bool = False) -> tu
             else "unreadable header"
         )
         if dry_run:
-            print(f"[would fix] {mp3.name} ({reason})")
+            log(f"[would fix] {mp3.name} ({reason})")
             fixed += 1
             continue
 
@@ -139,13 +154,13 @@ def fix_folder(folder: Path, bitrate: str = "320k", dry_run: bool = False) -> tu
                 "3",
                 str(tmp_out),
             ]
-            proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            proc = subprocess.run(cmd, capture_output=True, text=True, check=False, **subprocess_kwargs())
             if proc.returncode == 0 and tmp_out.is_file():
                 shutil.move(str(tmp_out), str(mp3))
-                print(f"[fixed] {mp3.name} ({reason})")
+                log(f"[fixed] {mp3.name} ({reason})")
                 fixed += 1
             else:
-                print(f"[failed] {mp3.name}: {proc.stderr.strip()}")
+                log(f"[failed] {mp3.name}: {proc.stderr.strip()}")
                 failed += 1
 
     return fixed, skipped, failed
